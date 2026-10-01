@@ -244,26 +244,62 @@ class TextGenerator(Protocol):
 
 class OpenAIGenerator:
     def __init__(self, max_output_tokens: int = 300) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "").strip()
+        api_key = (
+            os.getenv("GROQ_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+        if not base_url and (os.getenv("GROQ_API_KEY") or api_key.startswith("gsk_")):
+            base_url = "https://api.groq.com/openai/v1"
+
+        self.model = (
+            os.getenv("GROQ_MODEL", "").strip()
+            or os.getenv("OPENAI_MODEL", "").strip()
+        )
+        if not self.model and base_url and "groq" in base_url:
+            self.model = "llama-3.3-70b-versatile"
+
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing from .env")
+            raise RuntimeError("API key is missing from .env (OPENAI_API_KEY or GROQ_API_KEY)")
         if not self.model:
-            raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+            raise RuntimeError("Model is missing from .env (OPENAI_MODEL or GROQ_MODEL)")
+
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
-        if not answer:
-            raise RuntimeError("OpenAI returned an empty answer")
-        return answer
+        tokens = max(self.max_output_tokens, 1500)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=tokens,
+            )
+            msg = response.choices[0].message
+            answer = (msg.content or "").strip()
+            if not answer and getattr(msg, "reasoning", None):
+                answer = str(msg.reasoning).strip()
+            if not answer and getattr(msg, "reasoning_content", None):
+                answer = str(msg.reasoning_content).strip()
+            if answer:
+                return answer
+        except Exception:
+            if hasattr(self.client, "responses"):
+                resp = self.client.responses.create(
+                    model=self.model,
+                    input=prompt,
+                    temperature=0,
+                    max_output_tokens=self.max_output_tokens,
+                )
+                answer = resp.output_text.strip()
+                if answer:
+                    return answer
+            raise
+        raise RuntimeError("LLM returned an empty answer")
 
 
 @dataclass(frozen=True)
